@@ -56,6 +56,36 @@ function normalizeCode(value: string) {
   return value.trim().replace(/\s+/g, ' ').toLowerCase()
 }
 
+function normalizeShelf(value: string) {
+  const shelf = value.trim()
+  return shelf || 'その他'
+}
+
+function splitShelfHierarchy(value: string) {
+  const shelf = normalizeShelf(value)
+  const parts = shelf.split(/\s+/).filter(Boolean)
+
+  if (parts.length <= 1) {
+    return { parent: shelf, child: '' }
+  }
+
+  return {
+    parent: parts[0],
+    child: parts.slice(1).join(' '),
+  }
+}
+
+type PendingShelfLeaf = {
+  label: string
+  reagents: Reagent[]
+}
+
+type PendingShelfGroup = {
+  parent: string
+  directReagents: Reagent[]
+  children: PendingShelfLeaf[]
+}
+
 function App() {
   const [mode, setMode] = useState<Mode>('scan')
   const [password, setPassword] = useState('')
@@ -65,12 +95,16 @@ function App() {
   const [unlockError, setUnlockError] = useState('')
   const [inventory, setInventory] = useState<Inventory | null>(null)
   const [manualCode, setManualCode] = useState('')
+  const [searchTargetCode, setSearchTargetCode] = useState('')
+  const [searchTargetIds, setSearchTargetIds] = useState<string[]>([])
   const [scanStatus, setScanStatus] = useState<ScanStatus>('idle')
   const [scanMessage, setScanMessage] = useState('Camera is idle.')
   const [lastFeedback, setLastFeedback] = useState<ScanFeedback | null>(null)
   const [scanSeed, setScanSeed] = useState(0)
   const [scannedAt, setScannedAt] = useState<Record<string, number>>({})
   const [cameraHint, setCameraHint] = useState('')
+  const [showAllShelves, setShowAllShelves] = useState(false)
+  const [showUnscannedItems, setShowUnscannedItems] = useState(false)
 
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
@@ -91,6 +125,8 @@ function App() {
     return buildReagentIndex(inventory)
   }, [inventory])
 
+  const searchTargetSet = useMemo(() => new Set(searchTargetIds), [searchTargetIds])
+
   const shelfGroups = useMemo(() => {
     if (!inventory) {
       return []
@@ -98,17 +134,34 @@ function App() {
 
     const groups = new Map<string, Reagent[]>()
     for (const reagent of inventory.reagents) {
-      const list = groups.get(reagent.shelf) ?? []
+      const shelf = normalizeShelf(reagent.shelf)
+      const list = groups.get(shelf) ?? []
       list.push(reagent)
-      groups.set(reagent.shelf, list)
+      groups.set(shelf, list)
     }
 
-    return Array.from(groups.entries()).map(([shelf, reagents]) => ({
-      shelf,
-      reagents,
-      scanned: reagents.filter((entry) => scannedAt[normalizeCode(entry.id)]).length,
-    }))
+    return Array.from(groups.entries())
+      .map(([shelf, reagents]) => ({
+        shelf,
+        reagents,
+        scanned: reagents.filter((entry) => scannedAt[normalizeCode(entry.id)]).length,
+      }))
+      .sort((left, right) => {
+        if (right.scanned !== left.scanned) {
+          return right.scanned - left.scanned
+        }
+
+        return left.shelf.localeCompare(right.shelf)
+      })
   }, [inventory, scannedAt])
+
+  const visibleShelfGroups = useMemo(() => {
+    if (showAllShelves) {
+      return shelfGroups
+    }
+
+    return shelfGroups.slice(0, 3)
+  }, [shelfGroups, showAllShelves])
 
   const totalCount = inventory?.reagents.length ?? 0
   const scannedCount = useMemo(() => Object.keys(scannedAt).length, [scannedAt])
@@ -126,6 +179,51 @@ function App() {
       (entry) => !scannedAt[normalizeCode(entry.id)],
     )
   }, [inventory, scannedAt])
+
+  const pendingShelfGroups = useMemo<PendingShelfGroup[]>(() => {
+    const parentGroups = new Map<
+      string,
+      {
+        directReagents: Reagent[]
+        childGroups: Map<string, Reagent[]>
+      }
+    >()
+
+    for (const reagent of pendingReagents) {
+      const { parent, child } = splitShelfHierarchy(reagent.shelf)
+      const group = parentGroups.get(parent) ?? {
+        directReagents: [],
+        childGroups: new Map<string, Reagent[]>(),
+      }
+
+      if (child) {
+        const list = group.childGroups.get(child) ?? []
+        list.push(reagent)
+        group.childGroups.set(child, list)
+      } else {
+        group.directReagents.push(reagent)
+      }
+
+      parentGroups.set(parent, group)
+    }
+
+    return Array.from(parentGroups.entries())
+      .map(([parent, group]) => ({
+        parent,
+        directReagents: group.directReagents.sort((left, right) =>
+          left.name.localeCompare(right.name),
+        ),
+        children: Array.from(group.childGroups.entries())
+          .map(([label, reagents]) => ({
+            label,
+            reagents: reagents.sort((left, right) => left.name.localeCompare(right.name)),
+          }))
+          .sort((left, right) => left.label.localeCompare(right.label)),
+      }))
+      .sort((left, right) => left.parent.localeCompare(right.parent))
+  }, [pendingReagents])
+
+  const hasSearchTargets = searchTargetIds.length > 0
 
   const stopCamera = () => {
     if (scanLoopRef.current !== null) {
@@ -179,6 +277,7 @@ function App() {
 
     const reagent = reagentIndex.get(normalized)
     const matched = Boolean(reagent)
+    const isSearchTarget = searchTargetSet.has(normalized)
     const frame: ScanFrame = {
       raw: rawValue.trim(),
       matched,
@@ -201,9 +300,11 @@ function App() {
       at: now,
     })
     setScanMessage(
-      matched
-        ? `${reagent?.name ?? 'Unknown'} matched.`
-        : 'This QR code is not registered.',
+      isSearchTarget
+        ? `${reagent?.name ?? 'Target QR'} found.`
+        : matched
+          ? `${reagent?.name ?? 'Unknown'} matched.`
+          : 'This QR code is not registered, but it is allowed as a warning.',
     )
 
     if (matched && reagent) {
@@ -328,7 +429,7 @@ function App() {
     }
     // observeCode is stable within each render pass and only used inside the async loop.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, unlockState, scanSeed])
+  }, [mode, unlockState, scanSeed, searchTargetSet])
 
   useEffect(() => {
     if (mode !== 'scan' || unlockState !== 'open') {
@@ -392,11 +493,19 @@ function App() {
       context.strokeRect(12, 12, width - 24, height - 24)
 
       for (const frame of frames) {
-        const accent = frame.matched ? '#47e6b1' : '#f0b349'
+        const normalizedFrame = normalizeCode(frame.raw)
+        const isSearchTarget = searchTargetSet.has(normalizedFrame)
+        const accent = isSearchTarget
+          ? '#ff5d5d'
+          : frame.matched
+            ? '#47e6b1'
+            : '#f0b349'
         context.strokeStyle = accent
-        context.fillStyle = frame.matched
-          ? 'rgba(71, 230, 177, 0.14)'
-          : 'rgba(240, 179, 73, 0.12)'
+        context.fillStyle = isSearchTarget
+          ? 'rgba(255, 93, 93, 0.18)'
+          : frame.matched
+            ? 'rgba(71, 230, 177, 0.14)'
+            : 'rgba(240, 179, 73, 0.12)'
         context.lineWidth = 3
 
         if (frame.cornerPoints?.length === 4) {
@@ -502,6 +611,29 @@ function App() {
     setManualCode('')
   }
 
+  const submitSearchTarget = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const normalized = normalizeCode(searchTargetCode)
+    if (!normalized) {
+      return
+    }
+
+    setSearchTargetIds((current) =>
+      current.includes(normalized) ? current : [...current, normalized],
+    )
+    setSearchTargetCode('')
+  }
+
+  const removeSearchTarget = (target: string) => {
+    setSearchTargetIds((current) => current.filter((entry) => entry !== target))
+  }
+
+  const clearSearchTargets = () => {
+    setSearchTargetIds([])
+  }
+
+  const isWarningResult = Boolean(lastFeedback && !lastFeedback.matched)
+
   if (unlockState !== 'open' || !inventory) {
     return (
       <main className="unlock-screen">
@@ -599,8 +731,10 @@ function App() {
               autoPlay
             />
             <canvas ref={canvasRef} className="preview-overlay" />
-            <div className="preview-copy">
-              <p>{scanMessage}</p>
+          <div className="preview-copy">
+              <p className={isWarningResult ? 'warning-underline' : ''}>
+                {scanMessage}
+              </p>
               {cameraHint ? <span>{cameraHint}</span> : null}
             </div>
           </div>
@@ -617,20 +751,86 @@ function App() {
             </button>
           </div>
 
-          <form className="manual-form" onSubmit={submitManualCode}>
-            <label className="field-label" htmlFor="manual-code">
-              QR ID
-            </label>
-            <div className="manual-row">
-              <input
-                id="manual-code"
-                value={manualCode}
-                onChange={(event) => setManualCode(event.target.value)}
-                placeholder="Enter a scanned ID"
-              />
-              <button type="submit">Check</button>
+          <details className="help-details">
+            <summary>どうしてもQRコードが読めない時</summary>
+            <div className="help-details-body">
+              <p className="status-copy">
+                カメラで読めないときだけ、QR ID を手入力して確認できます。
+              </p>
+              <form className="manual-form" onSubmit={submitManualCode}>
+                <label className="field-label" htmlFor="manual-code">
+                  QR ID
+                </label>
+                <div className="manual-row">
+                  <input
+                    id="manual-code"
+                    value={manualCode}
+                    onChange={(event) => setManualCode(event.target.value)}
+                    placeholder="Paste or type a QR ID"
+                  />
+                  <button type="submit">Check</button>
+                </div>
+              </form>
             </div>
-          </form>
+          </details>
+
+          <section className="search-target-panel">
+            <div className="panel-head compact">
+              <div>
+                <p className="eyebrow">Search targets</p>
+                <h2>探索中 IDs</h2>
+              </div>
+              <p className="inventory-count">{searchTargetIds.length} ids</p>
+            </div>
+
+            <p className="status-copy">
+              ID を登録しておくと、見つかった領域を赤で強調します。
+            </p>
+
+            <form className="manual-form" onSubmit={submitSearchTarget}>
+              <label className="field-label" htmlFor="search-target-code">
+                Add target ID
+              </label>
+              <div className="manual-row">
+                <input
+                  id="search-target-code"
+                  value={searchTargetCode}
+                  onChange={(event) => setSearchTargetCode(event.target.value)}
+                  placeholder="Enter an ID to search for"
+                />
+                <button type="submit">Add</button>
+              </div>
+            </form>
+
+            <div className="target-actions">
+              <button
+                type="button"
+                className="ghost"
+                onClick={clearSearchTargets}
+                disabled={!hasSearchTargets}
+              >
+                Clear all
+              </button>
+            </div>
+
+            {hasSearchTargets ? (
+              <div className="target-chip-list">
+                {searchTargetIds.map((target) => (
+                  <button
+                    key={target}
+                    type="button"
+                    className="target-chip"
+                    onClick={() => removeSearchTarget(target)}
+                    title="Click to remove"
+                  >
+                    {target}
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <p className="status-copy">No exploration targets registered yet.</p>
+            )}
+          </section>
         </article>
 
         <aside className="summary-pane">
@@ -677,22 +877,24 @@ function App() {
             </div>
 
             {lastFeedback ? (
-              <div className={`focus-card ${lastFeedback.matched ? 'ok' : 'warn'}`}>
+              <div className="focus-card">
                 <p className="focus-title">
                   {lastFeedback.matched ? lastFeedback.reagent?.name : 'Unregistered QR'}
                 </p>
                 <dl>
                   <div>
                     <dt>QR ID</dt>
-                    <dd>{lastFeedback.raw}</dd>
+                    <dd className={isWarningResult ? 'warning-underline' : ''}>
+                      {lastFeedback.raw}
+                    </dd>
                   </div>
                   <div>
                     <dt>Status</dt>
-                    <dd>{lastFeedback.matched ? 'valid' : 'invalid'}</dd>
+                    <dd>{lastFeedback.matched ? 'valid' : 'warning'}</dd>
                   </div>
                   <div>
                     <dt>Shelf</dt>
-                    <dd>{lastFeedback.reagent?.shelf ?? '---'}</dd>
+                    <dd>{lastFeedback.reagent ? normalizeShelf(lastFeedback.reagent.shelf) : '---'}</dd>
                   </div>
                 </dl>
               </div>
@@ -707,10 +909,17 @@ function App() {
                 <p className="eyebrow">Shelves</p>
                 <h2>Per-shelf progress</h2>
               </div>
+              <button
+                type="button"
+                className="ghost shelf-toggle"
+                onClick={() => setShowAllShelves((value) => !value)}
+              >
+                {showAllShelves ? '簡易表示' : '詳細'}
+              </button>
             </div>
 
             <div className="shelf-list">
-              {shelfGroups.map((group) => (
+              {visibleShelfGroups.map((group) => (
                 <div key={group.shelf} className="shelf-row">
                   <div>
                     <strong>{group.shelf}</strong>
@@ -728,6 +937,11 @@ function App() {
                 </div>
               ))}
             </div>
+            {!showAllShelves && shelfGroups.length > visibleShelfGroups.length ? (
+              <p className="status-copy shelf-note">
+                Showing top {visibleShelfGroups.length} shelves by scanned count.
+              </p>
+            ) : null}
           </section>
         </aside>
       </section>
@@ -738,18 +952,77 @@ function App() {
             <p className="eyebrow">Inventory</p>
             <h2>Unscanned items</h2>
           </div>
-          <p className="inventory-count">{pendingReagents.length} items</p>
+          <div className="inventory-head-actions">
+            <p className="inventory-count">{pendingReagents.length} items</p>
+            <button
+              type="button"
+              className="ghost shelf-toggle"
+              onClick={() => setShowUnscannedItems((value) => !value)}
+            >
+              {showUnscannedItems ? '折りたたむ' : '展開'}
+            </button>
+          </div>
         </div>
 
-        <div className="inventory-grid">
-          {pendingReagents.map((reagent) => (
-            <article key={reagent.id} className="inventory-item">
-              <p className="item-name">{reagent.name}</p>
-              <p className="item-meta">{reagent.id}</p>
-              <p className="item-meta">{reagent.shelf}</p>
-            </article>
-          ))}
-        </div>
+        {showUnscannedItems ? (
+          <div className="inventory-shelves">
+            {pendingShelfGroups.map((group) => {
+              const childCount = group.children.reduce(
+                (total, child) => total + child.reagents.length,
+                0,
+              )
+              const totalCount = group.directReagents.length + childCount
+
+              return (
+              <details key={group.parent} className="inventory-shelf inventory-shelf-parent">
+                <summary>
+                  <div>
+                    <strong>{group.parent}</strong>
+                    <span>{totalCount} items</span>
+                  </div>
+                </summary>
+                <div className="inventory-shelf-children">
+                  {group.directReagents.length ? (
+                    <div className="inventory-shelf-direct">
+                      <div className="inventory-shelf-direct-head">
+                        <strong>親直下</strong>
+                        <span>{group.directReagents.length} items</span>
+                      </div>
+                      <div className="inventory-grid">
+                        {group.directReagents.map((reagent) => (
+                          <article key={reagent.id} className="inventory-item">
+                            <p className="item-name">{reagent.name}</p>
+                            <p className="item-meta">{reagent.id}</p>
+                          </article>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {group.children.map((child) => (
+                    <details key={`${group.parent} ${child.label}`} className="inventory-shelf inventory-shelf-child">
+                      <summary>
+                        <div>
+                          <strong>{child.label}</strong>
+                          <span>{child.reagents.length} items</span>
+                        </div>
+                      </summary>
+                      <div className="inventory-grid">
+                        {child.reagents.map((reagent) => (
+                          <article key={reagent.id} className="inventory-item">
+                            <p className="item-name">{reagent.name}</p>
+                            <p className="item-meta">{reagent.id}</p>
+                          </article>
+                        ))}
+                      </div>
+                    </details>
+                  ))}
+                </div>
+              </details>
+              )
+            })}
+          </div>
+        ) : null}
       </section>
     </main>
   )
