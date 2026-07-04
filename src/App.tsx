@@ -440,8 +440,8 @@ function App() {
         Math.min(width - 56, 300),
       )
       context.font = '12px system-ui, sans-serif'
-      context.fillStyle = frame.matched ? '#9cf7cf' : '#f3cc8f'
-      context.fillText(frame.matched ? 'VALID' : 'SCAN', 28, height - 26)
+      context.fillStyle = frames[0].matched ? '#9cf7cf' : '#f3cc8f'
+      context.fillText(frames[0].matched ? 'VALID' : 'SCAN', 28, height - 26)
 
       drawLoopRef.current = window.requestAnimationFrame(draw)
     }
