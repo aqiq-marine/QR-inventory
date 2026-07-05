@@ -1,4 +1,5 @@
 import type { Reagent } from './inventory'
+import { normalizeCode } from './code'
 import type { ShelfSelection } from './shelfSelection'
 
 export type ShelfLeaf = {
@@ -106,4 +107,86 @@ export function getShelfReagents(
 
   const child = group.children.find((entry) => entry.label === selection.child)
   return child ? [...child.reagents] : ([] as Reagent[])
+}
+
+export type ShelfInference = {
+  selection: ShelfSelection | null
+  label: string
+  scannedCount: number
+  totalCount: number
+}
+
+function getSelectionLabel(selection: ShelfSelection) {
+  return selection.child ? `${selection.parent} / ${selection.child}` : selection.parent
+}
+
+export function inferBestShelfSelection(
+  groups: ShelfGroup[],
+  scannedAt: Record<string, number>,
+): ShelfInference {
+  const candidates: Array<{
+    selection: ShelfSelection
+    label: string
+    reagents: Reagent[]
+  }> = []
+
+  for (const group of groups) {
+    candidates.push({
+      selection: { parent: group.parent, child: null },
+      label: group.parent,
+      reagents: flattenShelfGroups([group]),
+    })
+
+    for (const child of group.children) {
+      candidates.push({
+        selection: { parent: group.parent, child: child.label },
+        label: `${group.parent} / ${child.label}`,
+        reagents: child.reagents,
+      })
+    }
+  }
+
+  let best: ShelfInference & { rank: [number, number, string] } | null = null
+
+  for (const candidate of candidates) {
+    const scannedCount = candidate.reagents.filter(
+      (reagent) => scannedAt[normalizeCode(reagent.id)],
+    ).length
+    const totalCount = candidate.reagents.length
+    const rank: [number, number, string] = [
+      scannedCount,
+      -totalCount,
+      getSelectionLabel(candidate.selection).toLowerCase(),
+    ]
+
+    if (!best) {
+      best = { selection: candidate.selection, label: candidate.label, scannedCount, totalCount, rank }
+      continue
+    }
+
+    const [bestScanned, bestNegativeTotal, bestLabel] = best.rank
+    const [scanned, negativeTotal, label] = rank
+
+    if (
+      scanned > bestScanned ||
+      (scanned === bestScanned && negativeTotal > bestNegativeTotal) ||
+      (scanned === bestScanned &&
+        negativeTotal === bestNegativeTotal &&
+        label.localeCompare(bestLabel) < 0)
+    ) {
+      best = { selection: candidate.selection, label: candidate.label, scannedCount, totalCount, rank }
+    }
+  }
+
+  if (!best || best.scannedCount === 0) {
+    return {
+      selection: null,
+      label: '',
+      scannedCount: 0,
+      totalCount: 0,
+    }
+  }
+
+  const { rank: _rank, ...result } = best
+  return result
 }

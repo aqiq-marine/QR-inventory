@@ -14,6 +14,7 @@ import {
 } from './lib/inventory'
 import { buildShelfGroups, normalizeShelf, type ShelfGroup } from './lib/shelves'
 import { useSelectedShelfState } from './hooks/useSelectedShelfState'
+import { INFERRED_SHELF_VALUE } from './lib/shelfSelection'
 import './App.css'
 import 'antd/dist/antd.css'
 import { Cascader } from 'antd'
@@ -171,14 +172,20 @@ function App() {
   // Cascader options for shelf selection (parent + child)
   const cascadeOptions = useMemo(
     () =>
-      inventoryShelfGroups.map((group) => ({
-        value: group.parent,
-        label: group.parent,
-        children: group.children.map((child) => ({
-          value: child.label,
-          label: child.label,
+      [
+        {
+          value: INFERRED_SHELF_VALUE,
+          label: '推論',
+        },
+        ...inventoryShelfGroups.map((group) => ({
+          value: group.parent,
+          label: group.parent,
+          children: group.children.map((child) => ({
+            value: child.label,
+            label: child.label,
+          })),
         })),
-      })),
+      ],
     [inventoryShelfGroups],
   )
 
@@ -188,6 +195,27 @@ function App() {
     allReagents: inventory?.reagents ?? [],
     scannedAt,
   })
+  const isInferenceSelected = selectedShelf === INFERRED_SHELF_VALUE
+  const selectedShelfPath = selectedShelfState.selection
+    ? selectedShelfState.label
+    : isInferenceSelected
+      ? selectedShelfState.inferenceLabel
+        ? `推論: ${selectedShelfState.inferenceLabel}`
+        : '推論できる棚がありません'
+      : ''
+
+  const foreignCodeSet = useMemo(
+    () =>
+      new Set(
+        selectedShelfState.foreignReagents.map((reagent) => normalizeCode(reagent.id)),
+      ),
+    [selectedShelfState.foreignReagents],
+  )
+  const foreignCodeSetRef = useRef<Set<string>>(new Set())
+
+  useEffect(() => {
+    foreignCodeSetRef.current = foreignCodeSet
+  }, [foreignCodeSet])
 
   const hasSearchTargets = searchTargetIds.length > 0
 
@@ -460,14 +488,16 @@ function App() {
 
       for (const frame of frames) {
         const normalizedFrame = normalizeCode(frame.raw)
-        const isSearchTarget = searchTargetSet.has(normalizedFrame)
-        const accent = isSearchTarget
+        const isForeignItem =
+          isCoverageMode && foreignCodeSetRef.current.has(normalizedFrame)
+        const isSearchTarget = isSearchMode && searchTargetSet.has(normalizedFrame)
+        const accent = isForeignItem || isSearchTarget
           ? '#ff5d5d'
           : frame.matched
             ? '#47e6b1'
             : '#f0b349'
         context.strokeStyle = accent
-        context.fillStyle = isSearchTarget
+        context.fillStyle = isForeignItem || isSearchTarget
           ? 'rgba(255, 93, 93, 0.18)'
           : frame.matched
             ? 'rgba(71, 230, 177, 0.14)'
@@ -942,14 +972,37 @@ function App() {
           <Cascader
             options={cascadeOptions}
             placeholder="棚を選択"
-            value={selectedShelf ? selectedShelf.split('/') : []}
-            onChange={(vals) => setSelectedShelf(vals.join('/'))}
+            value={
+              selectedShelf === INFERRED_SHELF_VALUE
+                ? [INFERRED_SHELF_VALUE]
+                : selectedShelf
+                  ? selectedShelf.split('/')
+                  : []
+            }
+            onChange={(vals) => {
+              if (vals[0] === INFERRED_SHELF_VALUE) {
+                setSelectedShelf(INFERRED_SHELF_VALUE)
+                return
+              }
+
+              setSelectedShelf(vals.join('/'))
+            }}
             style={{ width: 200, marginBottom: '1rem' }}
           />
 
-          {selectedShelfState.selection ? (
+          {selectedShelfState.selection || isInferenceSelected ? (
+            <p className="status-copy" style={{ marginBottom: '0.75rem' }}>
+              {isInferenceSelected
+                ? selectedShelfState.inferenceLabel
+                  ? `推論結果: ${selectedShelfState.inferenceLabel}`
+                  : '推論結果: まだ棚を推論できません'
+                : `選択中棚: ${selectedShelfState.label}`}
+            </p>
+          ) : null}
+
+          {selectedShelfState.selection || isInferenceSelected ? (
             <details className="inventory-shelf-targets" open style={{ marginBottom: '1rem' }}>
-              <summary>{selectedShelfState.label}</summary>
+              <summary>{selectedShelfPath}</summary>
               <ShelfItemsSection
                 title="Scanned items"
                 count={selectedShelfState.counts.scanned}

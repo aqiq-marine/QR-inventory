@@ -1,8 +1,13 @@
 import { useMemo } from 'react'
 import type { Reagent } from '../lib/inventory'
 import { normalizeCode } from '../lib/code'
-import { getShelfReagents, type ShelfGroup } from '../lib/shelves'
 import {
+  getShelfReagents,
+  inferBestShelfSelection,
+  type ShelfGroup,
+} from '../lib/shelves'
+import {
+  INFERRED_SHELF_VALUE,
   formatShelfSelection,
   parseShelfSelection,
   type ShelfSelection,
@@ -11,6 +16,8 @@ import {
 export type SelectedShelfState = {
   selection: ShelfSelection | null
   label: string
+  isInferred: boolean
+  inferenceLabel: string
   selectedReagents: Reagent[]
   scannedReagents: Reagent[]
   unscannedReagents: Reagent[]
@@ -38,9 +45,19 @@ export function useSelectedShelfState({
 }: UseSelectedShelfStateParams): SelectedShelfState {
   const selection = useMemo(() => parseShelfSelection(selectedShelf), [selectedShelf])
 
+  const inferred = useMemo(() => {
+    if (selectedShelf !== INFERRED_SHELF_VALUE) {
+      return null
+    }
+
+    return inferBestShelfSelection(shelfGroups, scannedAt)
+  }, [scannedAt, selectedShelf, shelfGroups])
+
+  const effectiveSelection = inferred?.selection ?? selection
+
   const selectedReagents = useMemo(() => {
-    return getShelfReagents(shelfGroups, selection)
-  }, [shelfGroups, selection])
+    return getShelfReagents(shelfGroups, effectiveSelection)
+  }, [effectiveSelection, shelfGroups])
 
   const selectedIdSet = useMemo(
     () => new Set(selectedReagents.map((reagent) => normalizeCode(reagent.id))),
@@ -58,7 +75,7 @@ export function useSelectedShelfState({
   )
 
   const foreignReagents = useMemo(() => {
-    if (!selection) {
+    if (!effectiveSelection) {
       return []
     }
 
@@ -66,11 +83,13 @@ export function useSelectedShelfState({
       const code = normalizeCode(reagent.id)
       return scannedAt[code] && !selectedIdSet.has(code)
     })
-  }, [allReagents, scannedAt, selectedIdSet, selection])
+  }, [allReagents, scannedAt, selectedIdSet, effectiveSelection])
 
   return {
-    selection,
-    label: formatShelfSelection(selection),
+    selection: effectiveSelection,
+    label: inferred ? `推論: ${inferred.label}` : formatShelfSelection(selection),
+    isInferred: Boolean(inferred),
+    inferenceLabel: inferred?.label ?? '',
     selectedReagents,
     scannedReagents,
     unscannedReagents,

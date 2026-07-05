@@ -3,7 +3,13 @@ export type ShelfSelection = {
   child: string | null
 }
 
+export const INFERRED_SHELF_VALUE = '__infer__'
+
 export function parseShelfSelection(value: string): ShelfSelection | null {
+  if (value === INFERRED_SHELF_VALUE) {
+    return null
+  }
+
   const [rawParent, ...childParts] = value.split('/')
   const parent = rawParent.trim()
   if (!parent) {
